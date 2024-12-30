@@ -3,64 +3,55 @@ package formatter
 import (
     "fmt"
     "strings"
-    "github.com/KnockOutEZ/diffdeck/internal/scanner"
+    "time"
+    "github.com/KnockOutEZ/diffdeck/internal/git"
 )
 
-type MarkdownFormatter struct{}
+type MarkdownFormatter struct {
+    opts Options
+}
 
-func (f *MarkdownFormatter) Format(files []scanner.File, cfg FormatConfig) (string, error) {
-    var sb strings.Builder
+func (f *MarkdownFormatter) Format(changes []git.FileChange) (string, error) {
+    var buf strings.Builder
 
-    // Add header
-    sb.WriteString("# Codebase Overview\n\n")
-    sb.WriteString("This file is a merged representation of the entire codebase, combining all repository files into a single document.\n\n")
-    
-    if cfg.HeaderText != "" {
-        sb.WriteString(cfg.HeaderText)
-        sb.WriteString("\n\n")
-    }
+    buf.WriteString("# Diffdeck Output\n\n")
+    buf.WriteString(fmt.Sprintf("Generated: %s\n\n", time.Now().Format(time.RFC3339)))
 
-    // Add file summary if enabled
-    if cfg.ShowFileSummary {
-        sb.WriteString("## File Summary\n\n")
-        summary := generateFileSummary(files, cfg.TopFilesLength)
-        sb.WriteString(summary)
-        sb.WriteString("\n\n")
-    }
+    buf.WriteString("## Summary\n\n")
+    buf.WriteString(fmt.Sprintf("- Total changes: %d\n", len(changes)))
+    buf.WriteString(fmt.Sprintf("- Diff mode: %s\n\n", f.opts.DiffMode))
 
-    // Add directory structure if enabled
-    if cfg.ShowDirStructure {
-        sb.WriteString("## Directory Structure\n\n")
-        sb.WriteString("```\n")
-        structure := generateDirectoryStructure(files)
-        sb.WriteString(structure)
-        sb.WriteString("```\n\n")
-    }
+    buf.WriteString("## Changes\n\n")
+    for _, change := range changes {
+        buf.WriteString(fmt.Sprintf("### %s\n\n", change.Path))
+        buf.WriteString(fmt.Sprintf("- Status: `%s`\n", change.Status))
+        buf.WriteString(fmt.Sprintf("- Language: `%s`\n", change.Language))
+        if change.Status == git.Renamed {
+            buf.WriteString(fmt.Sprintf("- Old path: `%s`\n", change.OldPath))
+        }
+        buf.WriteString("\n")
 
-    // Add files
-    sb.WriteString("## Repository Files\n\n")
-    for _, file := range files {
-        if !file.IsDir {
-            sb.WriteString(fmt.Sprintf("### File: %s\n\n", file.Path))
-            sb.WriteString("```")
-            
-            // Add language hint for syntax highlighting if available
-            if ext := getLanguageFromPath(file.Path); ext != "" {
-                sb.WriteString(ext)
+        switch f.opts.DiffMode {
+        case "unified":
+            diff := generateUnifiedDiff(change.OldContent, change.Content, f.opts.ShowLineNumbers)
+            buf.WriteString("```diff\n")
+            buf.WriteString(diff)
+            buf.WriteString("```\n\n")
+        case "side-by-side":
+            diff := generateSideBySideDiff(change.OldContent, change.Content, f.opts.ShowLineNumbers)
+            buf.WriteString("```\n")
+            buf.WriteString(diff)
+            buf.WriteString("```\n\n")
+        default:
+            buf.WriteString("```")
+            if change.Language != "Unknown" {
+                buf.WriteString(strings.ToLower(change.Language))
             }
-            
-            sb.WriteString("\n")
-            sb.WriteString(file.Content)
-            sb.WriteString("\n```\n\n")
+            buf.WriteString("\n")
+            buf.WriteString(change.Content)
+            buf.WriteString("```\n\n")
         }
     }
 
-    // Add instructions if provided
-    if cfg.InstructionText != "" {
-        sb.WriteString("## Instructions\n\n")
-        sb.WriteString(cfg.InstructionText)
-        sb.WriteString("\n")
-    }
-
-    return sb.String(), nil
+    return buf.String(), nil
 }

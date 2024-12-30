@@ -7,7 +7,6 @@ import (
     "golang.org/x/sys/windows"
 )
 
-// IsHiddenFile checks if a file is hidden on Windows systems
 func IsHiddenFile(path string) bool {
     pointer, err := windows.UTF16PtrFromString(path)
     if err != nil {
