@@ -1,279 +1,192 @@
-// internal/security/checker.go
 package security
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 
-	"github.com/KnockOutEZ/diffdeck/internal/scanner"
+	"github.com/KnockOutEZ/diffdeck/internal/git"
+	"github.com/schollz/progressbar/v3"
 )
 
-// Issue represents a security issue found in the code
+type Options struct {
+    MaxFileSize int64
+    Progress    *progressbar.ProgressBar
+    CustomPatterns map[string]string
+    SkipBinaries  bool
+    Severity      string
+}
+
 type Issue struct {
-    FilePath    string   `json:"filePath"`
-    Line        int      `json:"line"`
-    Column      int      `json:"column"`
-    RuleID      string   `json:"ruleId"`
-    Message     string   `json:"message"`
-    Severity    string   `json:"severity"`
-    Matches     []string `json:"matches,omitempty"`
-    Suggestion  string   `json:"suggestion,omitempty"`
+    FilePath    string
+    Line        int
+    Column      int
+    Rule        string
+    Description string
+    Severity    string
+    Content     string
 }
 
-// Checker handles security checks for files
 type Checker struct {
-    secretlintPath string
-    rules          []string
-    mu             sync.Mutex
+    patterns  map[string]*regexp.Regexp
+    progress  *progressbar.ProgressBar
+    maxSize   int64
+    skipBinaries bool
+    severity     string
+    mu        sync.Mutex
 }
 
-// CheckerOptions configures the security checker
-type CheckerOptions struct {
-    CustomRules []string
-    ExcludeRules []string
-    Severity     string // "error", "warn", or "info"
-}
-
-// New creates a new security checker
-func New(opts *CheckerOptions) (*Checker, error) {
-    // Ensure Secretlint is installed
-    secretlintPath, err := exec.LookPath("secretlint")
-    if err != nil {
-        return nil, fmt.Errorf("secretlint not found: %w", err)
-    }
-
-    // Default rules
-    rules := []string{
-        "@secretlint/secretlint-rule-preset-recommend",
-        "@secretlint/secretlint-rule-pattern",
-        "@secretlint/secretlint-rule-aws",
-        "@secretlint/secretlint-rule-gcp",
-        "@secretlint/secretlint-rule-privatekey",
-    }
-
-    // Add custom rules
-    if opts != nil && len(opts.CustomRules) > 0 {
-        rules = append(rules, opts.CustomRules...)
+func NewChecker(opts Options) *Checker {
+    patterns := defaultPatterns()
+    
+    // Add custom patterns if provided
+    if opts.CustomPatterns != nil {
+        for name, pattern := range opts.CustomPatterns {
+            compiled, err := regexp.Compile(pattern)
+            if err == nil {
+                patterns[name] = compiled
+            }
+        }
     }
 
     return &Checker{
-        secretlintPath: secretlintPath,
-        rules:         rules,
-    }, nil
+        patterns: patterns,
+        progress: opts.Progress,
+        maxSize:  opts.MaxFileSize,
+        skipBinaries: opts.SkipBinaries,
+        severity: opts.Severity,
+    }
 }
 
-// Check performs security checks on the given files
-func (c *Checker) Check(files []scanner.File) ([]Issue, error) {
+func (c *Checker) Check(changes []git.FileChange) ([]Issue, error) {
     var issues []Issue
-    var mu sync.Mutex
     var wg sync.WaitGroup
-    semaphore := make(chan struct{}, 5) // Limit concurrent checks
+    semaphore := make(chan struct{}, 10) // Limit concurrent checks
 
-    for _, file := range files {
-        if file.IsDir {
-            continue
-        }
-
+    for _, change := range changes {
         wg.Add(1)
-        go func(f scanner.File) {
+        go func(fc git.FileChange) {
             defer wg.Done()
-            semaphore <- struct{}{} // Acquire semaphore
-            defer func() { <-semaphore }() // Release semaphore
+            semaphore <- struct{}{} // Acquire
+            defer func() { <-semaphore }() // Release
 
-            // Create temporary file for checking
-            tempFile, err := c.createTempFile(f)
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Error creating temp file for %s: %v\n", f.Path, err)
-                return
-            }
-            defer os.Remove(tempFile)
+            fileIssues := c.checkFile(fc)
+            
+            c.mu.Lock()
+            issues = append(issues, fileIssues...)
+            c.mu.Unlock()
 
-            // Run Secretlint
-            fileIssues, err := c.checkFile(tempFile, f.Path)
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Error checking %s: %v\n", f.Path, err)
-                return
+            if c.progress != nil {
+                c.progress.Add(1)
             }
-
-            // Add found issues
-            if len(fileIssues) > 0 {
-                mu.Lock()
-                issues = append(issues, fileIssues...)
-                mu.Unlock()
-            }
-        }(file)
+        }(change)
     }
 
     wg.Wait()
-
-    // Sort issues by file path and line number
-    sort.Slice(issues, func(i, j int) bool {
-        if issues[i].FilePath == issues[j].FilePath {
-            return issues[i].Line < issues[j].Line
-        }
-        return issues[i].FilePath < issues[j].FilePath
-    })
-
     return issues, nil
 }
 
-// createTempFile creates a temporary file with the given content
-func (c *Checker) createTempFile(file scanner.File) (string, error) {
-    tempDir, err := os.MkdirTemp("", "diffdeck-security-*")
-    if err != nil {
-        return "", err
-    }
-
-    tempFile := filepath.Join(tempDir, filepath.Base(file.Path))
-    if err := os.WriteFile(tempFile, []byte(file.Content), 0644); err != nil {
-        os.RemoveAll(tempDir)
-        return "", err
-    }
-
-    return tempFile, nil
-}
-
-// checkFile runs Secretlint on a single file
-func (c *Checker) checkFile(filePath, originalPath string) ([]Issue, error) {
-    // Prepare Secretlint command
-    cmd := exec.Command(c.secretlintPath, "--format", "json", filePath)
-    var stdout, stderr bytes.Buffer
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
-
-    // Run Secretlint
-    err := cmd.Run()
-    if err != nil && !isExpectedError(err) {
-        return nil, fmt.Errorf("secretlint error: %s", stderr.String())
-    }
-
-    // Parse results
-    var result struct {
-        Messages []struct {
-            RuleID   string `json:"ruleId"`
-            Message  string `json:"message"`
-            Line     int    `json:"line"`
-            Column   int    `json:"column"`
-            Severity string `json:"severity"`
-        } `json:"messages"`
-    }
-
-    if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-        return nil, fmt.Errorf("error parsing secretlint output: %w", err)
-    }
-
-    // Convert to our Issue format
+func (c *Checker) checkFile(change git.FileChange) []Issue {
     var issues []Issue
-    for _, msg := range result.Messages {
-        issue := Issue{
-            FilePath: originalPath,
-            Line:     msg.Line,
-            Column:   msg.Column,
-            RuleID:   msg.RuleID,
-            Message:  msg.Message,
-            Severity: msg.Severity,
+
+    // Skip large files
+    if int64(len(change.Content)) > c.maxSize {
+        return issues
+    }
+
+    // Skip if the file looks like a Go file with imports
+    isGoFile := strings.HasSuffix(change.Path, ".go")
+    
+    lines := strings.Split(change.Content, "\n")
+    inImportBlock := false
+
+    for lineNum, line := range lines {
+        // Skip import blocks in Go files
+        if isGoFile {
+            if strings.HasPrefix(strings.TrimSpace(line), "import (") {
+                inImportBlock = true
+                continue
+            }
+            if inImportBlock {
+                if strings.HasPrefix(strings.TrimSpace(line), ")") {
+                    inImportBlock = false
+                }
+                continue
+            }
         }
-        issues = append(issues, issue)
-    }
 
-    return issues, nil
-}
+        // Check each pattern
+        for name, pattern := range c.patterns {
+            matches := pattern.FindAllStringIndex(line, -1)
+            for _, match := range matches {
+                start, end := match[0], match[1]
 
-// isExpectedError checks if the error is an expected Secretlint error
-// (Secretlint exits with code 1 when it finds issues)
-func isExpectedError(err error) bool {
-    if exitErr, ok := err.(*exec.ExitError); ok {
-        return exitErr.ExitCode() == 1
-    }
-    return false
-}
+                // Skip if the match is part of a Go import path
+                if isGoFile && strings.Contains(line[:start], "import") {
+                    continue
+                }
 
-// Additional security checks
+                // Get some context around the match
+                contextStart := max(0, start-20)
+                contextEnd := min(len(line), end+20)
+                context := line[contextStart:contextEnd]
 
-// checkPatterns checks for common sensitive patterns
-func (c *Checker) checkPatterns(content string) []Issue {
-    var issues []Issue
-    patterns := map[string]string{
-        "AWS Access Key":     `AKIA[0-9A-Z]{16}`,
-        "AWS Secret Key":     `[0-9a-zA-Z/+]{40}`,
-        "Private Key":        `-----BEGIN.*PRIVATE KEY-----`,
-        "SSH Private Key":    `-----BEGIN.*SSH.*PRIVATE KEY-----`,
-        "GitHub Token":       `gh[ps]_[0-9a-zA-Z]{36}`,
-        "Google API Key":     `AIza[0-9A-Za-z\\-_]{35}`,
-        "Password in Code":   `(?i)(?:password|passwd|pwd)\s*=\s*['"][^'"]+['"]`,
-        "API Key in Code":    `(?i)(?:api_key|apikey|api_secret|apisecret)\s*=\s*['"][^'"]+['"]`,
-        "IP Address":         `\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`,
-        "Internal URL":       `(?i)(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+`,
-    }
-
-    for name, pattern := range patterns {
-        matches := regexp.MustCompile(pattern).FindAllString(content, -1)
-        if len(matches) > 0 {
-            issues = append(issues, Issue{
-                Message:  fmt.Sprintf("Potential %s found", name),
-                Matches: matches,
-                Severity: "warning",
-            })
+                issues = append(issues, Issue{
+                    FilePath:    change.Path,
+                    Line:       lineNum + 1,
+                    Column:     start + 1,
+                    Rule:       name,
+                    Description: fmt.Sprintf("Found potential %s", name),
+                    Severity:   "WARNING",
+                    Content:    context,
+                })
+            }
         }
     }
 
     return issues
 }
 
-// CheckContent performs a quick security check on a string content
-func (c *Checker) CheckContent(content string) []Issue {
-    return c.checkPatterns(content)
+func max(a, b int) int {
+    if a > b {
+        return a
+    }
+    return b
 }
 
-// CreateReport generates a security report in various formats
-func (c *Checker) CreateReport(issues []Issue, format string) (string, error) {
-    switch format {
-    case "json":
-        data, err := json.MarshalIndent(issues, "", "  ")
-        if err != nil {
-            return "", err
-        }
-        return string(data), nil
-
-    case "text":
-        var sb strings.Builder
-        sb.WriteString("Security Check Report\n")
-        sb.WriteString("====================\n\n")
-
-        if len(issues) == 0 {
-            sb.WriteString("No security issues found.\n")
-            return sb.String(), nil
-        }
-
-        for _, issue := range issues {
-            sb.WriteString(fmt.Sprintf("File: %s\n", issue.FilePath))
-            sb.WriteString(fmt.Sprintf("Line: %d, Column: %d\n", issue.Line, issue.Column))
-            sb.WriteString(fmt.Sprintf("Rule: %s\n", issue.RuleID))
-            sb.WriteString(fmt.Sprintf("Severity: %s\n", issue.Severity))
-            sb.WriteString(fmt.Sprintf("Message: %s\n", issue.Message))
-            if len(issue.Matches) > 0 {
-                sb.WriteString("Matches:\n")
-                for _, match := range issue.Matches {
-                    sb.WriteString(fmt.Sprintf("  - %s\n", match))
-                }
-            }
-            if issue.Suggestion != "" {
-                sb.WriteString(fmt.Sprintf("Suggestion: %s\n", issue.Suggestion))
-            }
-            sb.WriteString("\n")
-        }
-
-        return sb.String(), nil
-
-    default:
-        return "", fmt.Errorf("unsupported format: %s", format)
+func min(a, b int) int {
+    if a < b {
+        return a
     }
+    return b
+}
+
+func defaultPatterns() map[string]*regexp.Regexp {
+    return map[string]*regexp.Regexp{
+        "AWS Access Key":     regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`),
+        "AWS Secret Key":     regexp.MustCompile(`(?i)(aws_secret|aws_key|aws_token|aws_access).{0,20}[A-Za-z0-9/+=]{40}`),
+        "Private Key":        regexp.MustCompile(`-----BEGIN (?:RSA |DSA |EC )?PRIVATE KEY-----`),
+        "SSH Private Key":    regexp.MustCompile(`-----BEGIN OPENSSH PRIVATE KEY-----`),
+        "GitHub Token":       regexp.MustCompile(`(?i)(github|gh)[0-9a-zA-Z_-]*token[ :="\']([0-9a-zA-Z]{35,40})`),
+        "Google API Key":     regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`),
+        "Password in Code":   regexp.MustCompile(`(?i)(?:password|passwd|pwd)[ :=]+['"][^'"\n]{8,}['"]`),
+        "API Key in Code":    regexp.MustCompile(`(?i)(?:api[_-]?key|api[_-]?secret|api[_-]?token)[ :=]+['"][^'"\n]{8,}['"]`),
+        "IP Address":         regexp.MustCompile(`(?:^|\s|=)(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])(?:\s|$)`),
+        "Internal URL":       regexp.MustCompile(`(?i)(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+`),
+    }
+}
+
+func findPosition(content string, offset int) (line, column int) {
+    line = 1
+    column = 1
+    for i := 0; i < offset; i++ {
+        if content[i] == '\n' {
+            line++
+            column = 1
+        } else {
+            column++
+        }
+    }
+    return
 }

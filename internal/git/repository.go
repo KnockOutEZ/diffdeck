@@ -1,53 +1,18 @@
 package git
 
 import (
-    "errors"
+    "context"
     "fmt"
-    "io"
-    "net/url"
     "os"
     "path/filepath"
-    "strings"
+    "time"
 
     "github.com/go-git/go-git/v5"
     "github.com/go-git/go-git/v5/plumbing"
     "github.com/go-git/go-git/v5/plumbing/object"
+    "github.com/schollz/progressbar/v3"
 )
 
-// Repository represents a Git repository
-type Repository struct {
-    URL           string
-    Branch        string
-    LocalPath     string
-    repo          *git.Repository
-    isTemporary   bool
-}
-
-// CloneOptions represents options for cloning a repository
-type CloneOptions struct {
-    Branch      string // Branch, tag, or commit hash to clone
-    Depth       int    // Depth for shallow clone (0 for full clone)
-    Progress    io.Writer // Writer for progress information
-}
-
-// DiffOptions represents options for generating diffs
-type DiffOptions struct {
-    IgnoreWhitespace bool
-    ContextLines     int
-    FromCommit       string
-    ToCommit         string
-}
-
-// FileChange represents a changed file in the repository
-type FileChange struct {
-    Path     string
-    Content  string
-    Status   ChangeStatus
-    OldPath  string // For renamed files
-    Language string // Detected programming language
-}
-
-// ChangeStatus represents the type of change
 type ChangeStatus string
 
 const (
@@ -58,267 +23,271 @@ const (
     Unmodified ChangeStatus = "unmodified"
 )
 
-// New creates a new Repository instance
-func New(repoURL string, opts CloneOptions) (*Repository, error) {
-    // Handle GitHub shorthand (e.g., "username/repo")
-    if !strings.Contains(repoURL, "://") && strings.Count(repoURL, "/") == 1 {
-        repoURL = "https://github.com/" + repoURL + ".git"
+type FileChange struct {
+    Path       string
+    OldPath    string
+    Content    string
+    OldContent string
+    Status     ChangeStatus
+    Language   string
+}
+
+type DiffOptions struct {
+    FromBranch   string
+    ToBranch     string
+    FromCommit   string
+    ToCommit     string
+    DiffMode     string
+    ContextLines int
+}
+
+type CloneOptions struct {
+    URL       string
+    Branch    string
+    CacheDir  string
+    Timeout   time.Duration
+    Progress  *progressbar.ProgressBar
+}
+
+type Repository struct {
+    url        string
+    localPath  string
+    repo       *git.Repository
+    isTemp     bool
+    progress   *progressbar.ProgressBar
+}
+
+func NewLocalRepository(path string, progress *progressbar.ProgressBar) (*Repository, error) {
+    repo, err := git.PlainOpen(path)
+    if err != nil {
+        return nil, fmt.Errorf("failed to open repository: %w", err)
     }
 
-    // Validate URL
-    if _, err := url.Parse(repoURL); err != nil {
-        return nil, fmt.Errorf("invalid repository URL: %w", err)
+    return &Repository{
+        localPath: path,
+        repo:      repo,
+        progress:  progress,
+    }, nil
+}
+
+func NewRemoteRepository(opts CloneOptions) (*Repository, error) {
+    // Create cache directory if it doesn't exist
+    if err := os.MkdirAll(opts.CacheDir, 0755); err != nil {
+        return nil, fmt.Errorf("failed to create cache directory: %w", err)
     }
 
-    // Create temporary directory for cloning
-    tempDir, err := os.MkdirTemp("", "diffdeck-*")
+    // Create temporary directory for clone
+    tempDir, err := os.MkdirTemp(opts.CacheDir, "repo-*")
     if err != nil {
         return nil, fmt.Errorf("failed to create temporary directory: %w", err)
     }
 
-    return &Repository{
-        URL:         repoURL,
-        Branch:      opts.Branch,
-        LocalPath:   tempDir,
-        isTemporary: true,
-    }, nil
-}
-
-// Clone clones the repository
-func (r *Repository) Clone(opts CloneOptions) error {
-    // Prepare clone options
-    cloneOpts := &git.CloneOptions{
-        URL:           r.URL,
-        Progress:      opts.Progress,
-        SingleBranch:  true,
-        Tags:          git.NoTags,
+    r := &Repository{
+        url:       opts.URL,
+        localPath: tempDir,
+        isTemp:    true,
+        progress:  opts.Progress,
     }
 
-    if opts.Depth > 0 {
-        cloneOpts.Depth = opts.Depth
+    // Set up clone options
+    cloneOpts := &git.CloneOptions{
+        URL:           opts.URL,
+        Progress:      progressWriter{opts.Progress},
+        SingleBranch:  true,
+        Depth:         1,
     }
 
     if opts.Branch != "" {
         cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(opts.Branch)
     }
 
-    // Clone the repository
-    repo, err := git.PlainClone(r.LocalPath, false, cloneOpts)
+    // Clone with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+    defer cancel()
+
+    repo, err := git.PlainCloneContext(ctx, tempDir, false, cloneOpts)
     if err != nil {
-        return fmt.Errorf("failed to clone repository: %w", err)
+        os.RemoveAll(tempDir)
+        return nil, fmt.Errorf("failed to clone repository: %w", err)
     }
 
     r.repo = repo
+    return r, nil
+}
+
+func (r *Repository) Close() error {
+    if r.isTemp && r.localPath != "" {
+        return os.RemoveAll(r.localPath)
+    }
     return nil
 }
 
-// GetChanges returns the changes between two commits
-func (r *Repository) GetChanges(opts DiffOptions) ([]FileChange, error) {
-    if r.repo == nil {
-        return nil, errors.New("repository not cloned")
-    }
-
-    // Get the repository head
-    head, err := r.repo.Head()
+func (r *Repository) CompareBranches(opts DiffOptions) ([]FileChange, error) {
+    // Get references for both branches
+    fromRef, err := r.repo.Reference(plumbing.NewBranchReferenceName(opts.FromBranch), true)
     if err != nil {
-        return nil, fmt.Errorf("failed to get repository head: %w", err)
+        return nil, fmt.Errorf("failed to get source branch reference: %w", err)
     }
 
-    // Get the commit objects
-    var fromCommit, toCommit *object.Commit
-    
-    if opts.FromCommit != "" {
-        fromHash := plumbing.NewHash(opts.FromCommit)
-        fromCommit, err = r.repo.CommitObject(fromHash)
-        if err != nil {
-            return nil, fmt.Errorf("failed to get 'from' commit: %w", err)
-        }
-    }
-
-    if opts.ToCommit != "" {
-        toHash := plumbing.NewHash(opts.ToCommit)
-        toCommit, err = r.repo.CommitObject(toHash)
-    } else {
-        toCommit, err = r.repo.CommitObject(head.Hash())
-    }
+    toRef, err := r.repo.Reference(plumbing.NewBranchReferenceName(opts.ToBranch), true)
     if err != nil {
-        return nil, fmt.Errorf("failed to get 'to' commit: %w", err)
+        return nil, fmt.Errorf("failed to get target branch reference: %w", err)
     }
 
-    // Get the changes between commits
-    changes := make([]FileChange, 0)
-    
-    if fromCommit != nil {
-        patch, err := fromCommit.Patch(toCommit)
-        if err != nil {
-            return nil, fmt.Errorf("failed to get patch: %w", err)
-        }
+    // Get commit objects
+    fromCommit, err := r.repo.CommitObject(fromRef.Hash())
+    if err != nil {
+        return nil, fmt.Errorf("failed to get source commit: %w", err)
+    }
 
-        for _, filePatch := range patch.FilePatches() {
-            from, to := filePatch.Files()
-            change := FileChange{}
+    toCommit, err := r.repo.CommitObject(toRef.Hash())
+    if err != nil {
+        return nil, fmt.Errorf("failed to get target commit: %w", err)
+    }
 
-            switch {
-            case from == nil && to != nil:
-                // Added file
-                change.Status = Added
-                change.Path = to.Path()
-                content, err := getFileContent(r.repo, toCommit, to.Path())
-                if err != nil {
-                    return nil, err
-                }
-                change.Content = content
+    // Get patch between commits
+    patch, err := fromCommit.Patch(toCommit)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get patch: %w", err)
+    }
 
-            case from != nil && to == nil:
-                // Deleted file
-                change.Status = Deleted
-                change.Path = from.Path()
-                content, err := getFileContent(r.repo, fromCommit, from.Path())
-                if err != nil {
-                    return nil, err
-                }
-                change.Content = content
+    var changes []FileChange
+    for _, filePatch := range patch.FilePatches() {
+        from, to := filePatch.Files()
+        change := FileChange{}
 
-            case from != nil && to != nil && from.Path() != to.Path():
+        switch {
+        case from == nil && to != nil:
+            // Added file
+            change.Status = Added
+            change.Path = to.Path()
+            change.Content = getFileContent(r.repo, toCommit, to.Path())
+
+        case from != nil && to == nil:
+            // Deleted file
+            change.Status = Deleted
+            change.Path = from.Path()
+            change.OldContent = getFileContent(r.repo, fromCommit, from.Path())
+
+        case from != nil && to != nil:
+            if from.Path() != to.Path() {
                 // Renamed file
                 change.Status = Renamed
                 change.OldPath = from.Path()
                 change.Path = to.Path()
-                content, err := getFileContent(r.repo, toCommit, to.Path())
-                if err != nil {
-                    return nil, err
-                }
-                change.Content = content
-
-            default:
+            } else {
                 // Modified file
                 change.Status = Modified
                 change.Path = to.Path()
-                content, err := getFileContent(r.repo, toCommit, to.Path())
-                if err != nil {
-                    return nil, err
-                }
-                change.Content = content
             }
-
-            change.Language = detectLanguage(change.Path)
-            changes = append(changes, change)
-        }
-    } else {
-        // If no fromCommit specified, include all files in current commit
-        files, err := toCommit.Files()
-        if err != nil {
-            return nil, fmt.Errorf("failed to get files: %w", err)
+            change.OldContent = getFileContent(r.repo, fromCommit, from.Path())
+            change.Content = getFileContent(r.repo, toCommit, to.Path())
         }
 
-        err = files.ForEach(func(f *object.File) error {
-            content, err := f.Contents()
-            if err != nil {
-                return err
-            }
+        change.Language = detectLanguage(change.Path)
+        changes = append(changes, change)
 
-            changes = append(changes, FileChange{
-                Path:     f.Name,
-                Content:  content,
-                Status:   Unmodified,
-                Language: detectLanguage(f.Name),
-            })
-            return nil
-        })
-        if err != nil {
-            return nil, fmt.Errorf("failed to process files: %w", err)
+        if r.progress != nil {
+            r.progress.Add(1)
         }
     }
 
     return changes, nil
 }
 
-// Close cleans up repository resources
-func (r *Repository) Close() error {
-    if r.isTemporary && r.LocalPath != "" {
-        if err := os.RemoveAll(r.LocalPath); err != nil {
-            return fmt.Errorf("failed to remove temporary directory: %w", err)
-        }
-    }
-    return nil
-}
-
-// Helper functions
-
-func getFileContent(repo *git.Repository, commit *object.Commit, path string) (string, error) {
+func getFileContent(repo *git.Repository, commit *object.Commit, path string) string {
     file, err := commit.File(path)
     if err != nil {
-        return "", fmt.Errorf("failed to get file %s: %w", path, err)
+        return ""
     }
 
     content, err := file.Contents()
     if err != nil {
-        return "", fmt.Errorf("failed to get contents of %s: %w", path, err)
+        return ""
     }
 
-    return content, nil
+    return content
 }
 
 func detectLanguage(path string) string {
-    ext := strings.ToLower(filepath.Ext(path))
+    ext := filepath.Ext(path)
     switch ext {
     case ".go":
         return "Go"
     case ".js":
         return "JavaScript"
-    case ".ts":
-        return "TypeScript"
     case ".py":
         return "Python"
     case ".java":
         return "Java"
+    case ".cpp", ".cc", ".cxx":
+        return "C++"
+    case ".cs":
+        return "C#"
     case ".rb":
         return "Ruby"
     case ".php":
         return "PHP"
-    case ".cs":
-        return "C#"
-    case ".cpp", ".cc":
-        return "C++"
-    case ".h", ".hpp":
-        return "C++"
-    case ".rs":
-        return "Rust"
     case ".swift":
         return "Swift"
+    case ".rs":
+        return "Rust"
     case ".kt":
         return "Kotlin"
-    case ".scala":
-        return "Scala"
-    case ".m":
-        return "Objective-C"
-    case ".mm":
-        return "Objective-C++"
-    case ".pl":
-        return "Perl"
-    case ".sh":
-        return "Shell"
-    case ".html":
-        return "HTML"
-    case ".css":
-        return "CSS"
-    case ".scss":
-        return "SCSS"
-    case ".sass":
-        return "Sass"
-    case ".less":
-        return "Less"
-    case ".json":
-        return "JSON"
-    case ".xml":
-        return "XML"
-    case ".yaml", ".yml":
-        return "YAML"
-    case ".md":
-        return "Markdown"
-    case ".sql":
-        return "SQL"
+    case ".ts":
+        return "TypeScript"
     default:
         return "Unknown"
     }
+}
+
+type progressWriter struct {
+    bar *progressbar.ProgressBar
+}
+
+func (pw progressWriter) Write(p []byte) (n int, err error) {
+    if pw.bar != nil {
+        pw.bar.Add(len(p))
+    }
+    return len(p), nil
+}
+
+func (r *Repository) GetChanges(opts DiffOptions) ([]FileChange, error) {
+    if opts.FromBranch != "" && opts.ToBranch != "" {
+        return r.CompareBranches(opts)
+    }
+
+    // If no branch comparison is requested, get all files from current branch
+    head, err := r.repo.Head()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get repository head: %w", err)
+    }
+
+    commit, err := r.repo.CommitObject(head.Hash())
+    if err != nil {
+        return nil, fmt.Errorf("failed to get commit: %w", err)
+    }
+
+    var changes []FileChange
+    files, err := commit.Files()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get files: %w", err)
+    }
+
+    err = files.ForEach(func(f *object.File) error {
+        content, err := f.Contents()
+        if err != nil {
+            return err
+        }
+
+        changes = append(changes, FileChange{
+            Path:     f.Name,
+            Content:  content,
+            Status:   Unmodified,
+            Language: detectLanguage(f.Name),
+        })
+        return nil
+    })
+
+    return changes, err
 }
