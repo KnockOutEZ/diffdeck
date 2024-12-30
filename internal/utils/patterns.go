@@ -29,7 +29,6 @@ func MatchesAny(path string, patterns []string) bool {
         if matched, _ := filepath.Match(pattern, path); matched {
             return true
         }
-        // Handle **/ pattern
         if strings.HasPrefix(pattern, "**/") {
             if matched, _ := filepath.Match(pattern[3:], path); matched {
                 return true

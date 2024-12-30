@@ -1,5 +1,3 @@
-// File: internal/formatter/xml.go
-
 package formatter
 
 import (

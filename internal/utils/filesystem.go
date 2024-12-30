@@ -11,7 +11,6 @@ import (
 	"golang.org/x/text/encoding/unicode"
 )
 
-// FileInfo represents detailed information about a file
 type FileInfo struct {
     Path          string
     Size          int64
@@ -26,7 +25,6 @@ type FileInfo struct {
     IsExecutable  bool
 }
 
-// GetFileInfo returns detailed information about a file
 func GetFileInfo(path string) (*FileInfo, error) {
     info, err := os.Lstat(path)
     if err != nil {
@@ -40,20 +38,16 @@ func GetFileInfo(path string) (*FileInfo, error) {
         IsDir:   info.IsDir(),
     }
 
-    // Check if it's a symlink
     fi.IsSymlink = info.Mode()&os.ModeSymlink != 0
 
-    // Check if it's hidden
     fi.IsHidden = IsHiddenFile(path)
 
-    // Check if it's executable
     fi.IsExecutable = info.Mode()&0111 != 0
 
-    // Get MIME type and text status
     if !fi.IsDir && !fi.IsSymlink {
         content, err := os.ReadFile(path)
         if err != nil {
-            return fi, nil // Return what we have if we can't read the file
+            return fi, nil 
         }
 
         mtype, isText := DetectMimeType(content)
@@ -61,9 +55,7 @@ func GetFileInfo(path string) (*FileInfo, error) {
         fi.IsText = isText
 
         if fi.IsText {
-            // Detect encoding
             fi.Encoding, _ = DetectEncoding(content)
-            // Count lines
             fi.LineCount = CountLines(content)
         }
     }
@@ -71,9 +63,7 @@ func GetFileInfo(path string) (*FileInfo, error) {
     return fi, nil
 }
 
-// DetectMimeType detects the MIME type of content
 func DetectMimeType(content []byte) (string, bool) {
-    // Read first 512 bytes for MIME detection
     buffer := content
     if len(buffer) > 512 {
         buffer = buffer[:512]
@@ -88,7 +78,6 @@ func DetectMimeType(content []byte) (string, bool) {
     return mtype, isText
 }
 
-// DetectEncoding detects the character encoding of content
 func DetectEncoding(content []byte) (string, error) {
     detector := chardet.NewTextDetector()
     result, err := detector.DetectBest(content)
@@ -98,7 +87,6 @@ func DetectEncoding(content []byte) (string, error) {
     return result.Charset, nil
 }
 
-// ReadFileWithEncoding reads a file with the specified encoding
 func ReadFileWithEncoding(path string, encodingName string) (string, error) {
     content, err := os.ReadFile(path)
     if err != nil {
@@ -125,13 +113,11 @@ func ReadFileWithEncoding(path string, encodingName string) (string, error) {
     return string(decoded), nil
 }
 
-// CountLines counts the number of lines in content
 func CountLines(content []byte) int {
     if len(content) == 0 {
         return 0
     }
 
-    // Count newlines
     count := 0
     for _, b := range content {
         if b == '\n' {
@@ -139,7 +125,6 @@ func CountLines(content []byte) int {
         }
     }
 
-    // Add one if file doesn't end with newline
     if content[len(content)-1] != '\n' {
         count++
     }

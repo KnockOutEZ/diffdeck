@@ -1,5 +1,3 @@
-// File: internal/formatter/markdown.go
-
 package formatter
 
 import (
@@ -16,16 +14,13 @@ type MarkdownFormatter struct {
 func (f *MarkdownFormatter) Format(changes []git.FileChange) (string, error) {
     var buf strings.Builder
 
-    // Write header
     buf.WriteString("# Diffdeck Output\n\n")
     buf.WriteString(fmt.Sprintf("Generated: %s\n\n", time.Now().Format(time.RFC3339)))
 
-    // Write summary
     buf.WriteString("## Summary\n\n")
     buf.WriteString(fmt.Sprintf("- Total changes: %d\n", len(changes)))
     buf.WriteString(fmt.Sprintf("- Diff mode: %s\n\n", f.opts.DiffMode))
 
-    // Write changes
     buf.WriteString("## Changes\n\n")
     for _, change := range changes {
         buf.WriteString(fmt.Sprintf("### %s\n\n", change.Path))

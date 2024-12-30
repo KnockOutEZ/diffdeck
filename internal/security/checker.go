@@ -40,7 +40,6 @@ type Checker struct {
 func NewChecker(opts Options) *Checker {
     patterns := defaultPatterns()
     
-    // Add custom patterns if provided
     if opts.CustomPatterns != nil {
         for name, pattern := range opts.CustomPatterns {
             compiled, err := regexp.Compile(pattern)
@@ -90,19 +89,16 @@ func (c *Checker) Check(changes []git.FileChange) ([]Issue, error) {
 func (c *Checker) checkFile(change git.FileChange) []Issue {
     var issues []Issue
 
-    // Skip large files
     if int64(len(change.Content)) > c.maxSize {
         return issues
     }
 
-    // Skip if the file looks like a Go file with imports
     isGoFile := strings.HasSuffix(change.Path, ".go")
     
     lines := strings.Split(change.Content, "\n")
     inImportBlock := false
 
     for lineNum, line := range lines {
-        // Skip import blocks in Go files
         if isGoFile {
             if strings.HasPrefix(strings.TrimSpace(line), "import (") {
                 inImportBlock = true
@@ -116,18 +112,15 @@ func (c *Checker) checkFile(change git.FileChange) []Issue {
             }
         }
 
-        // Check each pattern
         for name, pattern := range c.patterns {
             matches := pattern.FindAllStringIndex(line, -1)
             for _, match := range matches {
                 start, end := match[0], match[1]
 
-                // Skip if the match is part of a Go import path
                 if isGoFile && strings.Contains(line[:start], "import") {
                     continue
                 }
 
-                // Get some context around the match
                 contextStart := max(0, start-20)
                 contextEnd := min(len(line), end+20)
                 context := line[contextStart:contextEnd]

@@ -102,7 +102,6 @@ func run() error {
         return initializeConfig()
     }
 
-    // Load and validate configuration
     cfg, err := loadConfig()
     if err != nil {
         return fmt.Errorf("failed to load config: %w", err)
@@ -110,7 +109,6 @@ func run() error {
 
     applyCommandLineOverrides(cfg)
 
-    // Create progress bar if enabled
     var bar *progressbar.ProgressBar
     if progressBar {
         bar = progressbar.NewOptions(-1,
@@ -128,12 +126,11 @@ func run() error {
         )
     }
 
-    // Process repository
     var changes []git.FileChange
     if remoteURL != "" {
         changes, err = processRemoteRepository(bar)
     } else if fromBranch != "" && toBranch != "" {
-        changes, err = processLocalBranchComparison(bar)
+        changes, err = processLocalBranchComparison(bar, cfg)
     } else {
         changes, err = processLocalFiles(cfg, bar)
     }
@@ -141,14 +138,12 @@ func run() error {
         return err
     }
 
-    // Security check
     if !cfg.Security.DisableSecurityCheck {
         if err := runSecurityCheck(changes, bar); err != nil {
             return err
         }
     }
 
-    // Format and write output
     output, err := formatOutput(changes, cfg)
     if err != nil {
         return err
@@ -181,8 +176,11 @@ func processRemoteRepository(bar *progressbar.ProgressBar) ([]git.FileChange, er
     })
 }
 
-func processLocalBranchComparison(bar *progressbar.ProgressBar) ([]git.FileChange, error) {
-    repo, err := git.NewLocalRepository(".", bar)
+func processLocalBranchComparison(bar *progressbar.ProgressBar, cfg *config.Config) ([]git.FileChange, error) {
+    repo, err := git.NewLocalRepository(".", bar, git.RepositoryOptions{
+        IgnorePatterns: cfg.Ignore.Patterns,
+        Progress:       bar,
+    })
     if err != nil {
         return nil, fmt.Errorf("failed to open local repository: %w", err)
     }
@@ -194,6 +192,7 @@ func processLocalBranchComparison(bar *progressbar.ProgressBar) ([]git.FileChang
         DiffMode:   diffMode,
     })
 }
+
 
 func processLocalFiles(cfg *config.Config, bar *progressbar.ProgressBar) ([]git.FileChange, error) {
     paths := flag.Args()
@@ -207,18 +206,22 @@ func processLocalFiles(cfg *config.Config, bar *progressbar.ProgressBar) ([]git.
         return nil, fmt.Errorf("failed to scan files: %w", err)
     }
 
-    // Convert scanner.File to git.FileChange
-    changes := make([]git.FileChange, len(files))
-    for i, f := range files {
-        changes[i] = git.FileChange{
+    var changes []git.FileChange
+    for _, f := range files {
+        if utils.MatchesAny(f.Path, cfg.Ignore.Patterns) {
+            continue
+        }
+        
+        changes = append(changes, git.FileChange{
             Path:    f.Path,
             Content: f.Content,
             Status:  git.Unmodified,
-        }
+        })
     }
 
     return changes, nil
 }
+
 
 func runSecurityCheck(changes []git.FileChange, bar *progressbar.ProgressBar) error {
     checker := security.NewChecker(security.Options{
@@ -260,21 +263,18 @@ func formatOutput(changes []git.FileChange, cfg *config.Config) (string, error) 
 }
 
 func writeOutput(output string, cfg *config.Config) error {
-    // Write to file if specified
     if cfg.Output.FilePath != "" {
         if err := os.WriteFile(cfg.Output.FilePath, []byte(output), 0644); err != nil {
             return fmt.Errorf("failed to write output file: %w", err)
         }
     }
 
-    // Copy to clipboard if requested
     if cfg.Output.CopyToClipboard {
         if err := utils.CopyToClipboard(output); err != nil {
             return fmt.Errorf("failed to copy to clipboard: %w", err)
         }
     }
 
-    // Print to stdout if no file output specified
     if cfg.Output.FilePath == "" {
         fmt.Print(output)
     }

@@ -77,18 +77,15 @@ func (s *Scanner) scanDirectory(root string) ([]File, error) {
             return err
         }
 
-        // Convert to relative path for pattern matching
         relPath, err := filepath.Rel(root, path)
         if err != nil {
             return err
         }
 
-        // Special handling for the root directory
         if relPath == "." {
             return nil
         }
 
-        // Check ignore patterns
         if s.shouldIgnore(relPath) {
             if d.IsDir() {
                 return filepath.SkipDir
@@ -96,7 +93,6 @@ func (s *Scanner) scanDirectory(root string) ([]File, error) {
             return nil
         }
 
-        // Check include patterns
         if !s.shouldInclude(relPath) {
             if d.IsDir() {
                 return filepath.SkipDir
@@ -108,8 +104,8 @@ func (s *Scanner) scanDirectory(root string) ([]File, error) {
             s.wg.Add(1)
             go func() {
                 defer s.wg.Done()
-                s.semaphore <- struct{}{} // Acquire
-                defer func() { <-s.semaphore }() // Release
+                s.semaphore <- struct{}{}
+                defer func() { <-s.semaphore }()
 
                 file, err := s.scanFile(path)
                 if err != nil {
@@ -134,27 +130,20 @@ func (s *Scanner) scanDirectory(root string) ([]File, error) {
 }
 
 func (s *Scanner) shouldIgnore(path string) bool {
-    // Convert path separators to forward slashes for consistent matching
     path = filepath.ToSlash(path)
 
-    // Check against ignore patterns
     for _, pattern := range s.config.Ignore.Patterns {
-        // Convert pattern separators to forward slashes
         pattern = filepath.ToSlash(pattern)
 
-        // Handle different pattern types
         if strings.HasPrefix(pattern, "**/") {
-            // Match anywhere in path
             if matched, _ := doublestar.Match(pattern, path); matched {
                 return true
             }
         } else if strings.Contains(pattern, "**") {
-            // Pattern contains ** somewhere else
             if matched, _ := doublestar.Match(pattern, path); matched {
                 return true
             }
         } else {
-            // Simple pattern
             if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
                 return true
             }

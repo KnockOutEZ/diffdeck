@@ -35,15 +35,13 @@ type Config struct {
 func DefaultConfig() *Config {
     cfg := &Config{}
     
-    // Set default output options
     cfg.Output.FilePath = "diffdeck-output.txt"
     cfg.Output.Style = "plain"
     cfg.Output.ShowLineNumbers = false
     cfg.Output.CopyToClipboard = false
     cfg.Output.TopFilesLength = 5
 
-    // Set default patterns
-    cfg.Include = []string{"**/*"}  // Match everything by default
+    cfg.Include = []string{"**/*"}
     cfg.Ignore.Patterns = []string{
         ".git/**",
         ".github/**",
@@ -69,11 +67,9 @@ func DefaultConfig() *Config {
         "**/.vscode/**",
     }
 
-    // Set default security options
     cfg.Security.DisableSecurityCheck = false
     cfg.Security.MaxFileSize = 10 * 1024 * 1024 // 10MB
 
-    // Set default git options
     cfg.Git.CacheDir = filepath.Join(os.TempDir(), "diffdeck-cache")
     cfg.Git.Timeout = "5m"
 

@@ -36,15 +36,12 @@ type PlainFormatter struct {
 func (f *PlainFormatter) Format(changes []git.FileChange) (string, error) {
     var buf bytes.Buffer
 
-    // Write header
     buf.WriteString("Diffdeck Output\n")
     buf.WriteString("==============\n\n")
 
-    // Write summary
     buf.WriteString(fmt.Sprintf("Total changes: %d\n", len(changes)))
     buf.WriteString(fmt.Sprintf("Diff mode: %s\n\n", f.opts.DiffMode))
 
-    // Write changes
     for _, change := range changes {
         buf.WriteString(fmt.Sprintf("File: %s\n", change.Path))
         buf.WriteString(fmt.Sprintf("Status: %s\n", change.Status))

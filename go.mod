@@ -4,6 +4,7 @@ go 1.22.2
 
 require (
 	github.com/atotto/clipboard v0.1.4
+	github.com/bmatcuk/doublestar v1.3.4
 	github.com/bmatcuk/doublestar/v4 v4.7.1
 	github.com/go-git/go-git/v5 v5.13.0
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
